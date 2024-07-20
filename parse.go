@@ -9,12 +9,15 @@ import (
 	"strings"
 )
 
-/* expands IP/IPv6 CIDR into atomic IPs
+/*
+	expands IP/IPv6 CIDR into atomic IPs
+
 returns channel from which string IPs must be consumed
 returns error if mask is too wide, or CIDR is not syntaxed properly
 supported masks:
-	- for IPv4: /[0-32] (whole IPv4 space)
-	- for IPv6: /[64-128]: (up to 2^64 IPs) */
+  - for IPv4: /[0-32] (whole IPv4 space)
+  - for IPv6: /[64-128]: (up to 2^64 IPs)
+*/
 func expandCIDR(CIDR string) (chan string, error) {
 	// parse CIDR
 	_, ipnet, err := net.ParseCIDR(CIDR)
@@ -80,8 +83,11 @@ func expandCIDR(CIDR string) (chan string, error) {
 	return outputChan, nil
 }
 
-/* every value with slash is condiered as CIDR
-if it's not a valid one, it will fail at later processing */
+/*
+	every value with slash is condiered as CIDR
+
+if it's not a valid one, it will fail at later processing
+*/
 func isCIDR(value string) bool {
 	return strings.Contains(value, `/`)
 }
@@ -93,7 +99,9 @@ func init() {
 	bracketRegexp = regexp.MustCompile(`^\[.*\]$`)
 }
 
-/* parses input addr into -> host, port.
+/*
+	parses input addr into -> host, port.
+
 if port is not specified, returns ports as empty string.
 tolerates IPv6 port specification without enclosing IP into square brackets.
 in truly ambiguous cases for IPv6, treat as portless

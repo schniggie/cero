@@ -2,27 +2,27 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"log"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
-  "bytes"
-  "context"
-  "encoding/json"
-  "log"
-  "github.com/elastic/go-elasticsearch/v8"
-  "github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
 type ScanResult struct {
-    Timestamp time.Time `json:"@timestamp"`
-    Address   string    `json:"address"`
-    Names     []string  `json:"names"`
-    ScanID    string    `json:"scan_id"`
+	Timestamp time.Time `json:"@timestamp"`
+	Address   string    `json:"address"`
+	Names     []string  `json:"names"`
+	ScanID    string    `json:"scan_id"`
 }
 
 /* result of processing a domain name */
@@ -65,11 +65,11 @@ func main() {
 
 	flag.Parse()
 
-  // Create the Elasticsearch client
-  es, err := elasticsearch.NewDefaultClient()
-  if err != nil {
-  	log.Fatalf("Error creating the client: %s", err)
-  }
+	// Create the Elasticsearch client
+	es, err := elasticsearch.NewDefaultClient()
+	if err != nil {
+		log.Fatalf("Error creating the client: %s", err)
+	}
 
 	// parse default port list into string slice
 	defaultPorts = strings.Split(ports, `,`)
@@ -121,45 +121,45 @@ func main() {
 					fmt.Fprintln(os.Stdout, name)
 				}
 			}
-      scanResult := ScanResult {
-      	Timestamp: time.Now(),
-      	Address:   result.addr,
-      	Names:     result.names,
-      	ScanID:    "unique-scan-id", // Generate a unique ID for each scan
-      }
+			scanResult := ScanResult{
+				Timestamp: time.Now(),
+				Address:   result.addr,
+				Names:     result.names,
+				ScanID:    time.Now().Format("2006-01-02"), // Use current date as ScanID
+			}
 
-      // Convert scanResult to JSON
-      data, err := json.Marshal(scanResult)
-      if err != nil {
-      	log.Printf("Error marshaling document: %s", err)
-        continue
-      }
+			// Convert scanResult to JSON
+			data, err := json.Marshal(scanResult)
+			if err != nil {
+				log.Printf("Error marshaling document: %s", err)
+				continue
+			}
 
-      // Set up the request object
-      req := esapi.IndexRequest{
-      	Index:   "cero-scans",
-      	Body:    bytes.NewReader(data),
-      	Refresh: "true",
-      }
+			// Set up the request object
+			req := esapi.IndexRequest{
+				Index:   "cero-scans",
+				Body:    bytes.NewReader(data),
+				Refresh: "true",
+			}
 
-      // Perform the request with the client
-     res, err := req.Do(context.Background(), es)
-     if err != nil {
-     	log.Printf("Error getting response: %s", err)
-     	continue
-     }
-     defer res.Body.Close()
+			// Perform the request with the client
+			res, err := req.Do(context.Background(), es)
+			if err != nil {
+				log.Printf("Error getting response: %s", err)
+				continue
+			}
+			defer res.Body.Close()
 
-     if res.IsError() {
-     	log.Printf("[%s] Error indexing document", res.Status())
-     } else {
-     	var r map[string]interface{}
-      if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-      	log.Printf("Error parsing the response body: %s", err)
-      } else {
-      	log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
-      }
-     }
+			if res.IsError() {
+				log.Printf("[%s] Error indexing document", res.Status())
+			} else {
+				var r map[string]interface{}
+				if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+					log.Printf("Error parsing the response body: %s", err)
+				} else {
+					log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
+				}
+			}
 		}
 		outputWG.Done()
 	}()
@@ -229,8 +229,11 @@ func processInputItem(input string, chanInput chan string, chanResult chan *proc
 	}
 }
 
-/* connects to addr and grabs certificate information.
-returns slice of domain names from grabbed certificate */
+/*
+	connects to addr and grabs certificate information.
+
+returns slice of domain names from grabbed certificate
+*/
 func grabCert(addr string, dialer *net.Dialer, onlyValidDomainNames bool) ([]string, error) {
 	// dial
 	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
