@@ -39,6 +39,7 @@ var (
 	defaultPorts         []string
 	timeout              int
 	onlyValidDomainNames bool
+	scanIDSuffix         string
 )
 
 var usage = "" +
@@ -55,6 +56,7 @@ func main() {
 	flag.StringVar(&ports, "p", "443", "TLS ports to use, if not specified explicitly in host address. Use comma-separated list")
 	flag.IntVar(&timeout, "t", 4, "TLS Connection timeout in seconds")
 	flag.BoolVar(&onlyValidDomainNames, "d", false, "Output only valid domain names (e.g. strip IPs, wildcard domains and gibberish)")
+	flag.StringVar(&scanIDSuffix, "id", "", "Optional suffix to append to the ScanID")
 
 	// set custom usage text
 	flag.Usage = func() {
@@ -115,17 +117,17 @@ func main() {
 				} else {
 					fmt.Fprintf(os.Stdout, "%s -- %s\n", result.addr, result.names)
 				}
-			} else {
-				// non-verbose: just print scraped names, one at line
-				for _, name := range result.names {
-					fmt.Fprintln(os.Stdout, name)
-				}
+			}
+			// Generate ScanID
+			scanID := time.Now().Format("2006-01-02")
+			if scanIDSuffix != "" {
+				scanID = scanID + "-" + scanIDSuffix
 			}
 			scanResult := ScanResult{
 				Timestamp: time.Now(),
 				Address:   result.addr,
 				Names:     result.names,
-				ScanID:    time.Now().Format("2006-01-02"), // Use current date as ScanID
+				ScanID:    scanID,
 			}
 
 			// Convert scanResult to JSON
@@ -156,8 +158,6 @@ func main() {
 				var r map[string]interface{}
 				if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
 					log.Printf("Error parsing the response body: %s", err)
-				} else {
-					log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
 				}
 			}
 		}

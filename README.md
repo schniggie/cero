@@ -106,4 +106,6 @@ options:
   -t int
         TLS Connection timeout in seconds (default 4)
   -v    Be verbose: Output results as 'addr -- [result list]', output errors to stderr as 'addr -- error message'
+  -id string
+        Suffix to add to the field ScanID
   ```
