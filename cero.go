@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -136,12 +137,17 @@ func main() {
 				log.Printf("Error marshaling document: %s", err)
 				continue
 			}
+			if verbose {
+				// Print the JSON we're about to send
+				log.Printf("Attempting to index document: %s", string(data))
+			}
 
 			// Set up the request object
 			req := esapi.IndexRequest{
-				Index:   "cero-scans",
-				Body:    bytes.NewReader(data),
-				Refresh: "true",
+				Index:      "cero-scans",
+				Body:       bytes.NewReader(data),
+				Refresh:    "true",
+				DocumentID: "", // Let Elasticsearch generate a document ID
 			}
 
 			// Perform the request with the client
@@ -153,12 +159,21 @@ func main() {
 			defer res.Body.Close()
 
 			if res.IsError() {
-				log.Printf("[%s] Error indexing document", res.Status())
+				bodyBytes, err := ioutil.ReadAll(res.Body)
+				if err != nil {
+					log.Printf("Error reading error response body: %s", err)
+				}
+				log.Printf("[%s] Error indexing document: %s", res.Status(), string(bodyBytes))
 			} else {
 				var r map[string]interface{}
 				if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
 					log.Printf("Error parsing the response body: %s", err)
+				} else {
+					if verbose {
+						log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
+					}
 				}
+
 			}
 		}
 		outputWG.Done()
