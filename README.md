@@ -1,15 +1,17 @@
-![](https://img.shields.io/github/go-mod/go-version/glebarez/cero) ![](https://img.shields.io/codecov/c/github/glebarez/cero) [![build](https://github.com/glebarez/cero/actions/workflows/create-release.yaml/badge.svg)](https://github.com/glebarez/cero/actions/workflows/create-release.yaml)
+![](https://img.shields.io/github/go-mod/go-version/schniggie/cero) ![](https://img.shields.io/codecov/c/github/glebarez/cero) [![build](https://github.com/glebarez/cero/actions/workflows/create-release.yaml/badge.svg)](https://github.com/glebarez/cero/actions/workflows/create-release.yaml)
 
 # cero
 Cero will connect to remote hosts, and read domain names from the certificates provided during TLS handshake. <br>
 It is not limited to only HTTPS, and will scrape certificates from any protocol that works over TLS (e.g. SMTPS) - just give it the right ports to connect to.<br>
 Cero allows flexible specification of targets, including domain names, IP addresses, and CIDR ranges, with full support for IPv6.
 
+## Elastic support added, currently hardcoded to 127.0.0.1:9200
+
 ## Installation / Update
-- Download pre-compiled binary for your OS from [Latest release](https://github.com/glebarez/cero/releases/latest)
+- Download pre-compiled binary for your OS from [Latest release](https://github.com/schniggie/cero/releases/latest)
 - alternatively, compile from source:
 ```bash
-go install github.com/glebarez/cero@latest
+go install github.com/schniggie/cero@latest
 ```
 
 ## Usage examples
