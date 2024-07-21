@@ -65,6 +65,7 @@ type Metrics struct {
 	NamesFound        int64   `json:"names_found"`
 	ElapsedTime       float64 `json:"elapsed_time"`
 	EstimatedTimeLeft float64 `json:"estimated_time_left"`
+	ScanRate          float64 `json:"scan_rate"`
 }
 
 func main() {
@@ -332,8 +333,9 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 func getMetrics() Metrics {
 	elapsedTime := time.Since(startTime).Seconds()
-	scansPerSecond := float64(totalScanned) / elapsedTime
-	estimatedTimeLeft := float64(concurrency-int(totalScanned)) / scansPerSecond
+	totalScanned := atomic.LoadInt64(&totalScanned)
+	scanRate := float64(totalScanned) / elapsedTime
+	estimatedTimeLeft := float64(concurrency-int(totalScanned)) / scanRate
 
 	return Metrics{
 		TotalScanned:      atomic.LoadInt64(&totalScanned),
@@ -341,11 +343,12 @@ func getMetrics() Metrics {
 		NamesFound:        atomic.LoadInt64(&namesFound),
 		ElapsedTime:       elapsedTime,
 		EstimatedTimeLeft: estimatedTimeLeft,
+		ScanRate:          scanRate,
 	}
 }
 
 func printMetrics() {
 	metrics := getMetrics()
-	fmt.Printf("\rScanned: %d | Successful: %d | Names Found: %d | Elapsed Time: %.2fs | Est. Time Left: %.2fs",
-		metrics.TotalScanned, metrics.SuccessfulScans, metrics.NamesFound, metrics.ElapsedTime, metrics.EstimatedTimeLeft)
+	fmt.Printf("\rScanned: %d | Successful: %d | Names Found: %d | Elapsed Time: %.2fs | Est. Time Left: %.2fs | Scan Rate: %.2f/s",
+		metrics.TotalScanned, metrics.SuccessfulScans, metrics.NamesFound, metrics.ElapsedTime, metrics.EstimatedTimeLeft, metrics.ScanRate)
 }
