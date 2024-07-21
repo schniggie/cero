@@ -15,6 +15,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,6 +68,7 @@ type Metrics struct {
 	ElapsedTime       float64 `json:"elapsed_time"`
 	EstimatedTimeLeft float64 `json:"estimated_time_left"`
 	ScanRate          float64 `json:"scan_rate"`
+	MemoryUsage       float64 `json:"memory_usage"`
 }
 
 func main() {
@@ -97,9 +100,13 @@ func main() {
 	// parse default port list into string slice
 	defaultPorts = strings.Split(ports, `,`)
 
-	// channels
-	chanInput := make(chan string)
-	chanResult := make(chan *procResult)
+	// Set up memory management
+	debug.SetGCPercent(20)                       // More aggressive garbage collection
+	debug.SetMemoryLimit(2 * 1024 * 1024 * 1024) // 2GB memory limit
+
+	// Use a buffered channel to control input flow
+	chanInput := make(chan string, 1000)
+	chanResult := make(chan *procResult, 1000)
 
 	// a common dialer
 	dialer := &net.Dialer{
@@ -111,8 +118,26 @@ func main() {
 
 	// Start HTTP server for metrics
 	go func() {
+		port := 8081
+		var listener net.Listener
+		var err error
+
+		for {
+			listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				if isPortInUseError(err) {
+					port++
+					continue
+				}
+				log.Fatalf("Failed to start metrics server: %v", err)
+			}
+			break
+		}
+
+		log.Printf("Metrics server listening on port %d", port)
+
 		http.HandleFunc("/metrics", metricsHandler)
-		log.Fatal(http.ListenAndServe(":8081", nil))
+		log.Fatal(http.Serve(listener, nil))
 	}()
 
 	// Start a goroutine to periodically print metrics to the terminal
@@ -150,89 +175,42 @@ func main() {
 	// create and start result-processing worker
 	var outputWG sync.WaitGroup
 	outputWG.Add(1)
+
 	go func() {
-		for result := range chanResult {
-			atomic.AddInt64(&totalScanned, 1)
-			// Only process and index successful results
-			if result.err == nil && len(result.names) > 0 {
-				atomic.AddInt64(&successfulScans, 1)
-				atomic.AddInt64(&namesFound, int64(len(result.names)))
-				// Generate ScanID
-				scanID := time.Now().Format("2006-01-02")
-				if scanIDSuffix != "" {
-					scanID = scanID + "-" + scanIDSuffix
-				}
-				scanResult := ScanResult{
-					Timestamp: time.Now(),
-					Address:   result.addr,
-					Names:     result.names,
-					ScanID:    scanID,
-				}
+		resultBatch := make([]*procResult, 0, 1000)
+		resultTicker := time.NewTicker(5 * time.Second)
+		defer resultTicker.Stop()
 
-				// Convert scanResult to JSON
-				data, err := json.Marshal(scanResult)
-				if err != nil {
-					log.Printf("Error marshaling document: %s", err)
-					continue
+		for {
+			select {
+			case result, ok := <-chanResult:
+				if !ok {
+					// Process remaining results
+					processResultBatch(resultBatch, es)
+					outputWG.Done()
+					return
 				}
-				if verbose {
-					// Print the JSON we're about to send
-					log.Printf("Attempting to index document: %s", string(data))
+				resultBatch = append(resultBatch, result)
+				if len(resultBatch) >= 1000 {
+					processResultBatch(resultBatch, es)
+					resultBatch = resultBatch[:0]
 				}
-
-				// Set up the request object
-				req := esapi.IndexRequest{
-					Index:      "cero-scans",
-					Body:       bytes.NewReader(data),
-					Refresh:    "true",
-					DocumentID: "", // Let Elasticsearch generate a document ID
+			case <-resultTicker.C:
+				if len(resultBatch) > 0 {
+					processResultBatch(resultBatch, es)
+					resultBatch = resultBatch[:0]
 				}
-
-				// Perform the request with the client
-				res, err := req.Do(context.Background(), es)
-				if err != nil {
-					log.Printf("Error getting response: %s", err)
-					continue
-				}
-				defer res.Body.Close()
-
-				if res.IsError() {
-					bodyBytes, err := ioutil.ReadAll(res.Body)
-					if err != nil {
-						log.Printf("Error reading error response body: %s", err)
-					}
-					log.Printf("[%s] Error indexing document: %s", res.Status(), string(bodyBytes))
-				} else {
-					var r map[string]interface{}
-					if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-						log.Printf("Error parsing the response body: %s", err)
-					} else {
-						if verbose {
-							log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
-						}
-					}
-				}
-			}
-
-			// in verbose mode, print all errors and results, with corresponding input values
-			if verbose {
-				if result.err != nil {
-					fmt.Fprintf(os.Stderr, "%s -- %s\n", result.addr, result.err)
-				} else {
-					fmt.Fprintf(os.Stdout, "%s -- %s\n", result.addr, result.names)
-				}
+				// Trigger garbage collection
+				runtime.GC()
 			}
 		}
-		outputWG.Done()
 	}()
 
-	// consume output to start things moving
 	if len(flag.Args()) > 0 {
 		for _, addr := range flag.Args() {
 			processInputItem(addr, chanInput, chanResult)
 		}
 	} else {
-		// every line of stdin is considered as a input
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
 			addr := strings.TrimSpace(sc.Text())
@@ -240,11 +218,79 @@ func main() {
 		}
 	}
 
-	// close input channel when input fully consumed
 	close(chanInput)
-
-	// wait for processing to finish
 	outputWG.Wait()
+
+	// Final metrics output
+	printMetrics()
+}
+
+func processResultBatch(batch []*procResult, es *elasticsearch.Client) {
+	for _, result := range batch {
+		atomic.AddInt64(&totalScanned, 1)
+
+		if result.err == nil && len(result.names) > 0 {
+			atomic.AddInt64(&successfulScans, 1)
+			atomic.AddInt64(&namesFound, int64(len(result.names)))
+
+			scanID := time.Now().Format("2006-01-02")
+			if scanIDSuffix != "" {
+				scanID = scanID + "-" + scanIDSuffix
+			}
+			scanResult := ScanResult{
+				Timestamp: time.Now(),
+				Address:   result.addr,
+				Names:     result.names,
+				ScanID:    scanID,
+			}
+
+			data, err := json.Marshal(scanResult)
+			if err != nil {
+				log.Printf("Error marshaling document: %s", err)
+				continue
+			}
+			if verbose {
+				log.Printf("Attempting to index document: %s", string(data))
+			}
+
+			req := esapi.IndexRequest{
+				Index:      "cero-scans",
+				Body:       bytes.NewReader(data),
+				Refresh:    "true",
+				DocumentID: "",
+			}
+
+			res, err := req.Do(context.Background(), es)
+			if err != nil {
+				log.Printf("Error getting response: %s", err)
+				continue
+			}
+			defer res.Body.Close()
+
+			if res.IsError() {
+				bodyBytes, err := ioutil.ReadAll(res.Body)
+				if err != nil {
+					log.Printf("Error reading error response body: %s", err)
+				}
+				log.Printf("[%s] Error indexing document: %s", res.Status(), string(bodyBytes))
+			} else {
+				var r map[string]interface{}
+				if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+					log.Printf("Error parsing the response body: %s", err)
+				} else if verbose {
+					log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
+				}
+			}
+		}
+
+		if verbose {
+			if result.err != nil {
+				fmt.Fprintf(os.Stderr, "%s -- %s\n", result.addr, result.err)
+			} else {
+				fmt.Fprintf(os.Stdout, "%s -- %s\n", result.addr, result.names)
+			}
+		}
+	}
 }
 
 // process input item
@@ -291,11 +337,8 @@ func processInputItem(input string, chanInput chan string, chanResult chan *proc
 	}
 }
 
-/*
-	connects to addr and grabs certificate information.
-
-returns slice of domain names from grabbed certificate
-*/
+// connects to addr and grabs certificate information.
+// returns slice of domain names from grabbed certificate
 func grabCert(addr string, dialer *net.Dialer, onlyValidDomainNames bool) ([]string, error) {
 	// dial
 	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
@@ -337,6 +380,9 @@ func getMetrics() Metrics {
 	scanRate := float64(totalScanned) / elapsedTime
 	estimatedTimeLeft := float64(concurrency-int(totalScanned)) / scanRate
 
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
 	return Metrics{
 		TotalScanned:      atomic.LoadInt64(&totalScanned),
 		SuccessfulScans:   atomic.LoadInt64(&successfulScans),
@@ -344,11 +390,17 @@ func getMetrics() Metrics {
 		ElapsedTime:       elapsedTime,
 		EstimatedTimeLeft: estimatedTimeLeft,
 		ScanRate:          scanRate,
+		MemoryUsage:       float64(m.Alloc) / 1024 / 1024, // Memory usage in MB
 	}
 }
 
 func printMetrics() {
 	metrics := getMetrics()
-	fmt.Printf("\rScanned: %d | Successful: %d | Names Found: %d | Elapsed Time: %.2fs | Est. Time Left: %.2fs | Scan Rate: %.2f/s",
-		metrics.TotalScanned, metrics.SuccessfulScans, metrics.NamesFound, metrics.ElapsedTime, metrics.EstimatedTimeLeft, metrics.ScanRate)
+	fmt.Printf("\rScanned: %d | Successful: %d | Names Found: %d | Elapsed Time: %.2fs | Est. Time Left: %.2fs | Scan Rate: %.2f/s | Memory Usage: %.2f MB",
+		metrics.TotalScanned, metrics.SuccessfulScans, metrics.NamesFound, metrics.ElapsedTime, metrics.EstimatedTimeLeft, metrics.ScanRate, metrics.MemoryUsage)
+}
+
+// isPortInUseError checks if the error is due to the port being already in use
+func isPortInUseError(err error) bool {
+	return strings.Contains(err.Error(), "address already in use")
 }
