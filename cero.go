@@ -13,9 +13,11 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,6 +49,23 @@ var usage = "" +
 	`usage: cero [options] [targets]
 if [targets] not provided in commandline arguments, will read from stdin
 `
+
+// Global variables for metrics
+var (
+	totalScanned    int64
+	successfulScans int64
+	namesFound      int64
+	startTime       time.Time
+)
+
+// Metrics struct for JSON output
+type Metrics struct {
+	TotalScanned      int64   `json:"total_scanned"`
+	SuccessfulScans   int64   `json:"successful_scans"`
+	NamesFound        int64   `json:"names_found"`
+	ElapsedTime       float64 `json:"elapsed_time"`
+	EstimatedTimeLeft float64 `json:"estimated_time_left"`
+}
 
 func main() {
 	// parse CLI arguments
@@ -86,6 +105,27 @@ func main() {
 		Timeout: time.Duration(timeout) * time.Second,
 	}
 
+	// Initialize start time
+	startTime = time.Now()
+
+	// Start HTTP server for metrics
+	go func() {
+		http.HandleFunc("/metrics", metricsHandler)
+		log.Fatal(http.ListenAndServe(":8081", nil))
+	}()
+
+	// Start a goroutine to periodically print metrics to the terminal
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				printMetrics()
+			}
+		}
+	}()
+
 	// create and start concurrent workers
 	var workersWG sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -111,8 +151,11 @@ func main() {
 	outputWG.Add(1)
 	go func() {
 		for result := range chanResult {
+			atomic.AddInt64(&totalScanned, 1)
 			// Only process and index successful results
 			if result.err == nil && len(result.names) > 0 {
+				atomic.AddInt64(&successfulScans, 1)
+				atomic.AddInt64(&namesFound, int64(len(result.names)))
 				// Generate ScanID
 				scanID := time.Now().Format("2006-01-02")
 				if scanIDSuffix != "" {
@@ -279,4 +322,30 @@ func grabCert(addr string, dialer *net.Dialer, onlyValidDomainNames bool) ([]str
 	}
 
 	return names, nil
+}
+
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	metrics := getMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+func getMetrics() Metrics {
+	elapsedTime := time.Since(startTime).Seconds()
+	scansPerSecond := float64(totalScanned) / elapsedTime
+	estimatedTimeLeft := float64(concurrency-int(totalScanned)) / scansPerSecond
+
+	return Metrics{
+		TotalScanned:      atomic.LoadInt64(&totalScanned),
+		SuccessfulScans:   atomic.LoadInt64(&successfulScans),
+		NamesFound:        atomic.LoadInt64(&namesFound),
+		ElapsedTime:       elapsedTime,
+		EstimatedTimeLeft: estimatedTimeLeft,
+	}
+}
+
+func printMetrics() {
+	metrics := getMetrics()
+	fmt.Printf("\rScanned: %d | Successful: %d | Names Found: %d | Elapsed Time: %.2fs | Est. Time Left: %.2fs",
+		metrics.TotalScanned, metrics.SuccessfulScans, metrics.NamesFound, metrics.ElapsedTime, metrics.EstimatedTimeLeft)
 }
