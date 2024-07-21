@@ -111,6 +111,65 @@ func main() {
 	outputWG.Add(1)
 	go func() {
 		for result := range chanResult {
+			// Only process and index successful results
+			if result.err == nil && len(result.names) > 0 {
+				// Generate ScanID
+				scanID := time.Now().Format("2006-01-02")
+				if scanIDSuffix != "" {
+					scanID = scanID + "-" + scanIDSuffix
+				}
+				scanResult := ScanResult{
+					Timestamp: time.Now(),
+					Address:   result.addr,
+					Names:     result.names,
+					ScanID:    scanID,
+				}
+
+				// Convert scanResult to JSON
+				data, err := json.Marshal(scanResult)
+				if err != nil {
+					log.Printf("Error marshaling document: %s", err)
+					continue
+				}
+				if verbose {
+					// Print the JSON we're about to send
+					log.Printf("Attempting to index document: %s", string(data))
+				}
+
+				// Set up the request object
+				req := esapi.IndexRequest{
+					Index:      "cero-scans",
+					Body:       bytes.NewReader(data),
+					Refresh:    "true",
+					DocumentID: "", // Let Elasticsearch generate a document ID
+				}
+
+				// Perform the request with the client
+				res, err := req.Do(context.Background(), es)
+				if err != nil {
+					log.Printf("Error getting response: %s", err)
+					continue
+				}
+				defer res.Body.Close()
+
+				if res.IsError() {
+					bodyBytes, err := ioutil.ReadAll(res.Body)
+					if err != nil {
+						log.Printf("Error reading error response body: %s", err)
+					}
+					log.Printf("[%s] Error indexing document: %s", res.Status(), string(bodyBytes))
+				} else {
+					var r map[string]interface{}
+					if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+						log.Printf("Error parsing the response body: %s", err)
+					} else {
+						if verbose {
+							log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
+						}
+					}
+				}
+			}
+
 			// in verbose mode, print all errors and results, with corresponding input values
 			if verbose {
 				if result.err != nil {
@@ -118,62 +177,6 @@ func main() {
 				} else {
 					fmt.Fprintf(os.Stdout, "%s -- %s\n", result.addr, result.names)
 				}
-			}
-			// Generate ScanID
-			scanID := time.Now().Format("2006-01-02")
-			if scanIDSuffix != "" {
-				scanID = scanID + "-" + scanIDSuffix
-			}
-			scanResult := ScanResult{
-				Timestamp: time.Now(),
-				Address:   result.addr,
-				Names:     result.names,
-				ScanID:    scanID,
-			}
-
-			// Convert scanResult to JSON
-			data, err := json.Marshal(scanResult)
-			if err != nil {
-				log.Printf("Error marshaling document: %s", err)
-				continue
-			}
-			if verbose {
-				// Print the JSON we're about to send
-				log.Printf("Attempting to index document: %s", string(data))
-			}
-
-			// Set up the request object
-			req := esapi.IndexRequest{
-				Index:      "cero-scans",
-				Body:       bytes.NewReader(data),
-				Refresh:    "true",
-				DocumentID: "", // Let Elasticsearch generate a document ID
-			}
-
-			// Perform the request with the client
-			res, err := req.Do(context.Background(), es)
-			if err != nil {
-				log.Printf("Error getting response: %s", err)
-				continue
-			}
-			defer res.Body.Close()
-
-			if res.IsError() {
-				bodyBytes, err := ioutil.ReadAll(res.Body)
-				if err != nil {
-					log.Printf("Error reading error response body: %s", err)
-				}
-				log.Printf("[%s] Error indexing document: %s", res.Status(), string(bodyBytes))
-			} else {
-				var r map[string]interface{}
-				if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-					log.Printf("Error parsing the response body: %s", err)
-				} else {
-					if verbose {
-						log.Printf("[%s] %s; version=%d", res.Status(), r["result"], int(r["_version"].(float64)))
-					}
-				}
-
 			}
 		}
 		outputWG.Done()
